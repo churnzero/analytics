@@ -14,5 +14,5 @@ The ChurnZero Success Panel and Analytics client
   
 - __Without the snippet how do I set the app key?__
 
-  simply call ` ChurnZero.push(['setAppKey', '@YOUR_APP_KEY']);` somewhere in your app startup
+  simply call ` ChurnZero.push(['setAppKey', '@YOUR_APP_KEY']);` somewhere in your app startup after the analytics script has been loaded.
   
