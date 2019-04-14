@@ -1,6 +1,6 @@
 {
   "name": "churnzero-analytics",
-  "version": "2.0.49",
+  "version": "2.0.50",
   "description": "ChurnZero Analytics and Succes Panel library",
   "main": "dist/analytics.js",
   "scripts": {
