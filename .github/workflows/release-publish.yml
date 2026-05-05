@@ -1,0 +1,154 @@
+# CZ-57227: Publish self-host release with verifiable integrity hashes.
+#
+# Triggered when ReleaseChurnZeroAnalytics.bat runs `npm version patch` in the
+# analytics repo, which pushes a v* tag. This workflow then computes SHA-384
+# and SHA-256 hashes for dist/analytics.js, generates CHECKSUMS.txt, signs the
+# bundle via Sigstore, and creates the GitHub Release with all assets attached.
+#
+# Hashes are NOT committed back to the repo -- they live only as release
+# assets. Consumers find them on the release page and copy the SRI base64
+# string from the release notes.
+
+name: Publish release with hashes
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish v${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+
+      - name: Verify bundle exists
+        run: |
+          set -euo pipefail
+          if [[ ! -f dist/analytics.js ]]; then
+            echo "ERROR: dist/analytics.js not found at ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          ls -la dist/
+
+      - name: Compute hashes
+        id: hashes
+        working-directory: dist
+        run: |
+          set -euo pipefail
+
+          sha384sum analytics.js | awk '{print $1}' > analytics.js.sha384.hex
+          sha256sum analytics.js | awk '{print $1}' > analytics.js.sha256.hex
+
+          B64=$(openssl dgst -sha384 -binary analytics.js | openssl base64 -A)
+          printf 'sha384-%s' "$B64" > analytics.js.sha384.b64
+
+          {
+            echo "sha384_hex=$(cat analytics.js.sha384.hex)"
+            echo "sha384_b64=$(cat analytics.js.sha384.b64)"
+            echo "sha256_hex=$(cat analytics.js.sha256.hex)"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "--- computed hashes ---"
+          echo "SHA-384 (hex): $(cat analytics.js.sha384.hex)"
+          echo "SHA-256 (hex): $(cat analytics.js.sha256.hex)"
+          echo "SHA-384 (SRI): $(cat analytics.js.sha384.b64)"
+
+      - name: Write CHECKSUMS.txt
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          {
+            printf 'ChurnZero Analytics (self-hosted) -- Release %s\n' "${GITHUB_REF_NAME}"
+            printf 'Generated: %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            printf 'Workflow run: %s/%s/actions/runs/%s\n\n' "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf 'SHA-384 (hex):\n'
+            cat dist/analytics.js.sha384.hex
+            printf '\n\nSHA-384 (SRI base64):\n'
+            cat dist/analytics.js.sha384.b64
+            printf '\n\nSHA-256 (hex):\n'
+            cat dist/analytics.js.sha256.hex
+            printf '\n'
+          } > CHECKSUMS.txt
+          echo "--- CHECKSUMS.txt ---"
+          cat CHECKSUMS.txt
+
+      - name: Generate Sigstore build-provenance attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/analytics.js
+
+      - name: Render release notes
+        id: notes
+        env:
+          SRI_B64: ${{ steps.hashes.outputs.sha384_b64 }}
+          SHA384_HEX: ${{ steps.hashes.outputs.sha384_hex }}
+          SHA256_HEX: ${{ steps.hashes.outputs.sha256_hex }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="$(mktemp)"
+          cat > "$NOTES_FILE" <<EOF
+          ## Release ${GITHUB_REF_NAME}
+
+          Self-hosted JavaScript bundle for ChurnZero Analytics.
+
+          ### Subresource Integrity (SRI)
+
+          Drop this directly into your \`<script integrity="...">\`:
+
+          \`\`\`
+          ${SRI_B64}
+          \`\`\`
+
+          ### Hashes
+
+          | Algorithm | Format       | Value                                                                |
+          |-----------|--------------|----------------------------------------------------------------------|
+          | SHA-384   | hex          | \`${SHA384_HEX}\` |
+          | SHA-256   | hex          | \`${SHA256_HEX}\` |
+
+          ### Verifying
+
+          - **Windows:** \`certutil -hashfile dist\\analytics.js SHA384\`
+          - **Linux/macOS:** \`shasum -a 384 -b dist/analytics.js\`
+          - **SRI base64 (any):** \`openssl dgst -sha384 -binary dist/analytics.js | openssl base64 -A\`
+
+          Compare your output to the \`analytics.js.sha384.hex\` asset above. They must match byte-for-byte.
+
+          ### Build provenance
+
+          A Sigstore attestation was produced by this workflow run linking the published bundle to its build:
+
+          \`\`\`
+          gh attestation verify analytics.js --owner churnzero
+          \`\`\`
+
+          See [README integrity-verification](https://github.com/churnzero/analytics#integrity-verification) for SRI snippet usage and CDN requirements.
+          EOF
+          echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file "${NOTES_FILE}" \
+            --verify-tag \
+            "dist/analytics.js" \
+            "dist/analytics.js.sha384.hex" \
+            "dist/analytics.js.sha384.b64" \
+            "dist/analytics.js.sha256.hex" \
+            "CHECKSUMS.txt"
